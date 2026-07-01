@@ -1,4 +1,4 @@
-﻿package com.local.smsexporter;
+package com.local.smsexporter;
 
 import android.Manifest;
 import android.app.Activity;

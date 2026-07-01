@@ -1,4 +1,4 @@
-﻿# SMS Exporter Android
+# SMS Exporter Android
 
 Android-only, local-only SMS export app. It reads SMS messages after the user grants permission, then writes shareable files to the phone's Downloads folder.
 
