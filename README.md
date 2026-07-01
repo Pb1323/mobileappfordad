@@ -8,7 +8,7 @@ Android-only, local-only SMS export app. It reads SMS messages after the user gr
 - `sms-export-YYYYMMDD-HHMMSS.csv` - spreadsheet-friendly export
 - `sms-export-YYYYMMDD-HHMMSS.html` - browser-readable document
 
-Each message includes sender/number, direction, timestamp, message text, thread id, and SMS id.
+Each message includes contact name when available, sender/number, direction, timestamp, message text, thread id, and SMS id. TXT and HTML exports are grouped by person.
 
 The app does not upload messages to a server. Everything happens locally on the phone.
 
@@ -23,7 +23,7 @@ To install on an Android phone:
 3. Open the latest successful build.
 4. Download the APK artifact.
 5. Install the APK. Android may ask you to allow installs from the browser or file manager.
-6. Open the app, grant SMS permission, then tap `Export SMS`.
+6. Open the app, grant SMS and Contacts permission, then tap `Export SMS`.
 
 For easier public downloading, create a GitHub Release and upload the generated APK there.
 
@@ -52,5 +52,5 @@ SMS content can contain private, financial, medical, or security-sensitive infor
 - Android only.
 - Exports SMS database text rows exposed through Android's SMS provider.
 - MMS attachments are not exported.
-- Requires Android 10 or newer and explicit user permission before SMS can be read.
+- Requires Android 10 or newer and explicit user permission before SMS and Contacts can be read.
 - This is designed for sideloading from GitHub, not Play Store distribution.

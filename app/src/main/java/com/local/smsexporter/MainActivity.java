@@ -11,6 +11,7 @@ import android.net.Uri;
 import android.os.Build;
 import android.os.Bundle;
 import android.os.Environment;
+import android.provider.ContactsContract;
 import android.provider.MediaStore;
 import android.provider.Telephony;
 import android.view.Gravity;
@@ -27,11 +28,14 @@ import java.nio.charset.StandardCharsets;
 import java.text.SimpleDateFormat;
 import java.util.ArrayList;
 import java.util.Date;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Locale;
+import java.util.Map;
+import java.util.TreeMap;
 
 public class MainActivity extends Activity {
-    private static final int REQUEST_READ_SMS = 1001;
+    private static final int REQUEST_READ_DATA = 1001;
 
     private TextView statusText;
     private Button permissionButton;
@@ -63,7 +67,7 @@ public class MainActivity extends Activity {
         root.addView(title);
 
         TextView intro = new TextView(this);
-        intro.setText("Export every SMS on this phone into local files in Downloads. No server, no account, no store required.");
+        intro.setText("Export every SMS on this phone into local files in Downloads, grouped by contact. No server, no account, no store required.");
         intro.setTextSize(16);
         intro.setTextColor(0xFF334155);
         intro.setPadding(0, 0, 0, dp(18));
@@ -75,8 +79,8 @@ public class MainActivity extends Activity {
         statusText.setPadding(0, 0, 0, dp(16));
         root.addView(statusText);
 
-        permissionButton = primaryButton("Grant SMS Permission");
-        permissionButton.setOnClickListener(v -> requestSmsPermission());
+        permissionButton = primaryButton("Grant SMS and Contacts Permission");
+        permissionButton.setOnClickListener(v -> requestDataPermissions());
         root.addView(permissionButton);
 
         exportButton = primaryButton("Export SMS");
@@ -121,40 +125,44 @@ public class MainActivity extends Activity {
     }
 
     private void refreshPermissionState() {
-        boolean hasPermission = hasSmsPermission();
+        boolean hasPermission = hasRequiredPermissions();
         permissionButton.setVisibility(hasPermission ? View.GONE : View.VISIBLE);
         exportButton.setEnabled(hasPermission);
         statusText.setText(hasPermission
-                ? "Ready. Tap Export SMS to create transcript files in Downloads/SMS Exporter."
-                : "SMS permission is required before this app can read messages.");
+                ? "Ready. Tap Export SMS to create grouped transcript files in Downloads/SMS Exporter."
+                : "SMS and Contacts permissions are required to export messages with contact names.");
     }
 
-    private boolean hasSmsPermission() {
+    private boolean hasRequiredPermissions() {
         return Build.VERSION.SDK_INT < Build.VERSION_CODES.M
-                || checkSelfPermission(Manifest.permission.READ_SMS) == PackageManager.PERMISSION_GRANTED;
+                || (checkSelfPermission(Manifest.permission.READ_SMS) == PackageManager.PERMISSION_GRANTED
+                && checkSelfPermission(Manifest.permission.READ_CONTACTS) == PackageManager.PERMISSION_GRANTED);
     }
 
-    private void requestSmsPermission() {
+    private void requestDataPermissions() {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
-            requestPermissions(new String[]{Manifest.permission.READ_SMS}, REQUEST_READ_SMS);
+            requestPermissions(
+                    new String[]{Manifest.permission.READ_SMS, Manifest.permission.READ_CONTACTS},
+                    REQUEST_READ_DATA
+            );
         }
     }
 
     @Override
     public void onRequestPermissionsResult(int requestCode, String[] permissions, int[] grantResults) {
         super.onRequestPermissionsResult(requestCode, permissions, grantResults);
-        if (requestCode == REQUEST_READ_SMS) {
+        if (requestCode == REQUEST_READ_DATA) {
             refreshPermissionState();
         }
     }
 
     private void exportSms() {
-        if (!hasSmsPermission()) {
-            requestSmsPermission();
+        if (!hasRequiredPermissions()) {
+            requestDataPermissions();
             return;
         }
 
-        setBusy(true, "Reading SMS messages...");
+        setBusy(true, "Reading SMS messages and contacts...");
 
         new Thread(() -> {
             try {
@@ -169,7 +177,7 @@ public class MainActivity extends Activity {
                 runOnUiThread(() -> {
                     lastExportUris = uris;
                     shareButton.setEnabled(true);
-                    setBusy(false, "Export complete. " + messages.size() + " SMS messages saved to Downloads/SMS Exporter.");
+                    setBusy(false, "Export complete. " + messages.size() + " SMS messages saved by contact in Downloads/SMS Exporter.");
                     Toast.makeText(this, "SMS export complete", Toast.LENGTH_LONG).show();
                 });
             } catch (Exception error) {
@@ -180,6 +188,7 @@ public class MainActivity extends Activity {
 
     private List<SmsMessage> readSmsMessages() {
         ArrayList<SmsMessage> messages = new ArrayList<>();
+        Map<String, String> contactNameCache = new HashMap<>();
         String[] projection = new String[]{
                 Telephony.Sms._ID,
                 Telephony.Sms.ADDRESS,
@@ -211,6 +220,7 @@ public class MainActivity extends Activity {
                 SmsMessage message = new SmsMessage();
                 message.id = cursor.getLong(idIndex);
                 message.address = safe(cursor.getString(addressIndex));
+                message.contactName = resolveContactName(message.address, contactNameCache);
                 message.dateMillis = cursor.getLong(dateIndex);
                 message.type = cursor.getInt(typeIndex);
                 message.body = safe(cursor.getString(bodyIndex));
@@ -222,31 +232,61 @@ public class MainActivity extends Activity {
         return messages;
     }
 
+    private String resolveContactName(String address, Map<String, String> cache) {
+        if (address == null || address.trim().isEmpty()) {
+            return "";
+        }
+        if (cache.containsKey(address)) {
+            return cache.get(address);
+        }
+
+        String displayName = "";
+        Uri lookupUri = Uri.withAppendedPath(
+                ContactsContract.PhoneLookup.CONTENT_FILTER_URI,
+                Uri.encode(address)
+        );
+
+        try (Cursor cursor = getContentResolver().query(
+                lookupUri,
+                new String[]{ContactsContract.PhoneLookup.DISPLAY_NAME},
+                null,
+                null,
+                null
+        )) {
+            if (cursor != null && cursor.moveToFirst()) {
+                displayName = safe(cursor.getString(cursor.getColumnIndexOrThrow(ContactsContract.PhoneLookup.DISPLAY_NAME)));
+            }
+        }
+
+        cache.put(address, displayName);
+        return displayName;
+    }
+
     private Uri writeDownloadFile(String fileName, String mimeType, String content) throws Exception {
         byte[] bytes = content.getBytes(StandardCharsets.UTF_8);
         ContentResolver resolver = getContentResolver();
-                    ContentValues values = new ContentValues();
-            values.put(MediaStore.Downloads.DISPLAY_NAME, fileName);
-            values.put(MediaStore.Downloads.MIME_TYPE, mimeType);
-            values.put(MediaStore.Downloads.RELATIVE_PATH, Environment.DIRECTORY_DOWNLOADS + "/SMS Exporter");
-            values.put(MediaStore.Downloads.IS_PENDING, 1);
+        ContentValues values = new ContentValues();
+        values.put(MediaStore.Downloads.DISPLAY_NAME, fileName);
+        values.put(MediaStore.Downloads.MIME_TYPE, mimeType);
+        values.put(MediaStore.Downloads.RELATIVE_PATH, Environment.DIRECTORY_DOWNLOADS + "/SMS Exporter");
+        values.put(MediaStore.Downloads.IS_PENDING, 1);
 
-            Uri uri = resolver.insert(MediaStore.Downloads.EXTERNAL_CONTENT_URI, values);
-            if (uri == null) {
-                throw new IllegalStateException("Could not create download file");
+        Uri uri = resolver.insert(MediaStore.Downloads.EXTERNAL_CONTENT_URI, values);
+        if (uri == null) {
+            throw new IllegalStateException("Could not create download file");
+        }
+
+        try (OutputStream outputStream = resolver.openOutputStream(uri)) {
+            if (outputStream == null) {
+                throw new IllegalStateException("Could not open download file");
             }
+            outputStream.write(bytes);
+        }
 
-            try (OutputStream outputStream = resolver.openOutputStream(uri)) {
-                if (outputStream == null) {
-                    throw new IllegalStateException("Could not open download file");
-                }
-                outputStream.write(bytes);
-            }
-
-            values.clear();
-            values.put(MediaStore.Downloads.IS_PENDING, 0);
-            resolver.update(uri, values, null, null);
-            return uri;
+        values.clear();
+        values.put(MediaStore.Downloads.IS_PENDING, 0);
+        resolver.update(uri, values, null, null);
+        return uri;
     }
 
     private String buildText(List<SmsMessage> messages) {
@@ -255,12 +295,20 @@ public class MainActivity extends Activity {
         builder.append("Generated: ").append(formatDate(System.currentTimeMillis())).append("\n");
         builder.append("Messages: ").append(messages.size()).append("\n\n");
 
-        for (SmsMessage message : messages) {
-            builder.append("[").append(formatDate(message.dateMillis)).append("] ");
-            builder.append(message.direction()).append(" ");
-            builder.append(message.address.isEmpty() ? "Unknown" : message.address).append("\n");
-            builder.append(message.body).append("\n");
-            builder.append("Thread: ").append(message.threadId).append(" | SMS ID: ").append(message.id).append("\n\n");
+        for (Map.Entry<String, List<SmsMessage>> group : groupByPerson(messages).entrySet()) {
+            builder.append("========================================\n");
+            builder.append(group.getKey()).append("\n");
+            builder.append("Messages: ").append(group.getValue().size()).append("\n");
+            builder.append("========================================\n\n");
+
+            for (SmsMessage message : group.getValue()) {
+                builder.append("[").append(formatDate(message.dateMillis)).append("] ");
+                builder.append(message.direction()).append("\n");
+                builder.append(message.body).append("\n");
+                builder.append("Contact: ").append(message.contactName.isEmpty() ? "Unknown" : message.contactName).append("\n");
+                builder.append("Number: ").append(message.address.isEmpty() ? "Unknown" : message.address).append("\n");
+                builder.append("Thread: ").append(message.threadId).append(" | SMS ID: ").append(message.id).append("\n\n");
+            }
         }
 
         return builder.toString();
@@ -268,14 +316,17 @@ public class MainActivity extends Activity {
 
     private String buildCsv(List<SmsMessage> messages) {
         StringBuilder builder = new StringBuilder();
-        builder.append("id,thread_id,direction,address,timestamp,message\n");
-        for (SmsMessage message : messages) {
-            builder.append(csv(message.id)).append(",");
-            builder.append(csv(message.threadId)).append(",");
-            builder.append(csv(message.direction())).append(",");
-            builder.append(csv(message.address)).append(",");
-            builder.append(csv(formatDate(message.dateMillis))).append(",");
-            builder.append(csv(message.body)).append("\n");
+        builder.append("contact_name,address,id,thread_id,direction,timestamp,message\n");
+        for (Map.Entry<String, List<SmsMessage>> group : groupByPerson(messages).entrySet()) {
+            for (SmsMessage message : group.getValue()) {
+                builder.append(csv(message.contactName)).append(",");
+                builder.append(csv(message.address)).append(",");
+                builder.append(csv(message.id)).append(",");
+                builder.append(csv(message.threadId)).append(",");
+                builder.append(csv(message.direction())).append(",");
+                builder.append(csv(formatDate(message.dateMillis))).append(",");
+                builder.append(csv(message.body)).append("\n");
+            }
         }
         return builder.toString();
     }
@@ -287,26 +338,47 @@ public class MainActivity extends Activity {
         builder.append("<title>SMS Export</title>");
         builder.append("<style>");
         builder.append("body{font-family:Arial,sans-serif;margin:24px;background:#f8fafc;color:#0f172a}");
+        builder.append("section{margin:28px 0}h2{border-bottom:2px solid #0f172a;padding-bottom:8px}");
         builder.append("article{background:white;border:1px solid #e2e8f0;border-radius:8px;padding:14px;margin:12px 0}");
         builder.append(".meta{color:#475569;font-size:13px;margin-bottom:8px}.body{white-space:pre-wrap;font-size:15px}");
         builder.append("</style></head><body>");
         builder.append("<h1>SMS Export</h1>");
         builder.append("<p>Generated ").append(escapeHtml(formatDate(System.currentTimeMillis()))).append(". ");
-        builder.append(messages.size()).append(" messages.</p>");
+        builder.append(messages.size()).append(" messages grouped by contact.</p>");
 
-        for (SmsMessage message : messages) {
-            builder.append("<article><div class=\"meta\">");
-            builder.append(escapeHtml(formatDate(message.dateMillis))).append(" | ");
-            builder.append(escapeHtml(message.direction())).append(" | ");
-            builder.append(escapeHtml(message.address.isEmpty() ? "Unknown" : message.address));
-            builder.append(" | Thread ").append(message.threadId);
-            builder.append("</div><div class=\"body\">");
-            builder.append(escapeHtml(message.body));
-            builder.append("</div></article>");
+        for (Map.Entry<String, List<SmsMessage>> group : groupByPerson(messages).entrySet()) {
+            builder.append("<section><h2>").append(escapeHtml(group.getKey())).append("</h2>");
+            builder.append("<p>").append(group.getValue().size()).append(" messages</p>");
+            for (SmsMessage message : group.getValue()) {
+                builder.append("<article><div class=\"meta\">");
+                builder.append(escapeHtml(formatDate(message.dateMillis))).append(" | ");
+                builder.append(escapeHtml(message.direction())).append(" | ");
+                builder.append("Contact: ").append(escapeHtml(message.contactName.isEmpty() ? "Unknown" : message.contactName)).append(" | ");
+                builder.append("Number: ").append(escapeHtml(message.address.isEmpty() ? "Unknown" : message.address));
+                builder.append(" | Thread ").append(message.threadId);
+                builder.append("</div><div class=\"body\">");
+                builder.append(escapeHtml(message.body));
+                builder.append("</div></article>");
+            }
+            builder.append("</section>");
         }
 
         builder.append("</body></html>");
         return builder.toString();
+    }
+
+    private Map<String, List<SmsMessage>> groupByPerson(List<SmsMessage> messages) {
+        TreeMap<String, List<SmsMessage>> grouped = new TreeMap<>(String.CASE_INSENSITIVE_ORDER);
+        for (SmsMessage message : messages) {
+            String key = message.conversationLabel();
+            List<SmsMessage> group = grouped.get(key);
+            if (group == null) {
+                group = new ArrayList<>();
+                grouped.put(key, group);
+            }
+            group.add(message);
+        }
+        return grouped;
     }
 
     private void shareLastExport() {
@@ -324,7 +396,7 @@ public class MainActivity extends Activity {
     private void setBusy(boolean busy, String status) {
         progressBar.setVisibility(busy ? View.VISIBLE : View.GONE);
         permissionButton.setEnabled(!busy);
-        exportButton.setEnabled(!busy && hasSmsPermission());
+        exportButton.setEnabled(!busy && hasRequiredPermissions());
         shareButton.setEnabled(!busy && !lastExportUris.isEmpty());
         statusText.setText(status);
     }
@@ -359,9 +431,20 @@ public class MainActivity extends Activity {
         long id;
         long threadId;
         String address;
+        String contactName;
         long dateMillis;
         int type;
         String body;
+
+        String conversationLabel() {
+            if (contactName != null && !contactName.trim().isEmpty()) {
+                return contactName + " (" + (address == null || address.isEmpty() ? "Unknown number" : address) + ")";
+            }
+            if (address != null && !address.trim().isEmpty()) {
+                return address;
+            }
+            return "Unknown";
+        }
 
         String direction() {
             if (type == Telephony.Sms.MESSAGE_TYPE_SENT) {
@@ -386,4 +469,3 @@ public class MainActivity extends Activity {
         }
     }
 }
-
